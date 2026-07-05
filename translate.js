@@ -44,9 +44,11 @@ HARD RULES:
      Claude Code    -> "کلاود کد"
    Apply the same idea for any target language: phonetic transliteration in quotes.
 3. Keep each segment's meaning; do not merge, split, drop, or reorder segments.
-4. Preserve the segment count exactly. Every input id must appear once in the output.
+4. Preserve the segment count exactly. Every input id MUST appear once in the output — never skip or omit any id, even short ones.
 5. Do NOT add explanations, notes, or extra text. Translate ONLY the content.
-6. Keep line breaks inside a segment roughly similar when it reads naturally, but prioritize fluency.
+6. Translate EVERY segment fully into ${target}. Never leave source-language (English/Latin) words in the output — the ONLY Latin-script exception is a proper noun, which must be transliterated into ${target} and wrapped in quotes.
+7. PUNCTUATION: Do NOT end a line or a segment with a period, comma (، or ,), exclamation mark, semicolon, colon, or ellipsis (…/...). The ONLY punctuation allowed at the end is a question mark (؟) when the sentence is a question. Otherwise leave the end with no punctuation.
+8. LINE LENGTH: If a translated segment is long, split it into 2 or 3 short lines using a line break between them — do not put a long translation on one single long line. Keep each line short and easy to read.
 
 OUTPUT FORMAT:
 Return ONLY a JSON array. Each element: {"id": <number>, "t": "<translated text>"}.
@@ -112,15 +114,57 @@ async function translateBatch({ apiKey, model, system, batch }) {
   return map;
 }
 
+// Remove sentence-ending punctuation (except question marks) from every line's
+// end, per the requested Persian subtitle convention. Leading/trailing spaces
+// are trimmed per line but line breaks are kept.
+function cleanupText(text) {
+  return String(text)
+    .split('\n')
+    .map((line) =>
+      line
+        .replace(/[ \t]+$/u, '')
+        // strip trailing . , ، ! ; ؛ : … and repeated dots — but never ? or ؟
+        .replace(/[.,،!;؛:…]+$/u, '')
+        .replace(/[ \t]+$/u, '')
+    )
+    .join('\n');
+}
+
 // Stateless single-batch translate for the client-driven (short-request) flow.
 // `items` is [{ id, text }]; returns [{ id, t }] in the same order. Throws on API error.
 async function translateItems({ apiKey, model = 'claude-sonnet-5', source, target, tone, items }) {
   const system = buildSystemPrompt(source, target, tone);
-  const batch = items.map((it) => ({ id: it.id, text: it.text }));
-  const map = await translateBatch({ apiKey, model, system, batch });
+  const map = await translateBatch({
+    apiKey, model, system,
+    batch: items.map((it) => ({ id: it.id, text: it.text })),
+  });
+
+  // Any id the model skipped or returned empty for gets a focused retry BEFORE
+  // we ever fall back to the untranslated (English) original — this is the main
+  // reason source text used to leak into the output.
+  const isMissing = (it) => {
+    const t = map.get(Number(it.id));
+    return !(typeof t === 'string' && t.trim().length);
+  };
+  const missing = items.filter(isMissing);
+  if (missing.length) {
+    try {
+      const retry = await translateBatch({
+        apiKey, model, system,
+        batch: missing.map((it) => ({ id: it.id, text: it.text })),
+      });
+      for (const [k, v] of retry) {
+        if (typeof v === 'string' && v.trim().length) map.set(k, v);
+      }
+    } catch (e) {
+      /* keep whatever we have; original text is the last resort below */
+    }
+  }
+
   return items.map((it) => {
     const t = map.get(Number(it.id));
-    return { id: it.id, t: typeof t === 'string' && t.length ? t : it.text };
+    const finalText = typeof t === 'string' && t.trim().length ? t : it.text;
+    return { id: it.id, t: cleanupText(finalText) };
   });
 }
 
