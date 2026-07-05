@@ -1,0 +1,187 @@
+// Translation engine: batches SRT cues and translates them with the Claude API,
+// preserving cue order/count and following the tone + proper-noun rules.
+
+const API_URL = 'https://api.anthropic.com/v1/messages';
+
+const TONES = {
+  street: {
+    fa: 'محاوره‌ای و کوچه‌بازاری',
+    guide:
+      'Very casual, colloquial "street" register. Use everyday spoken slang and ' +
+      'idioms of the TARGET language, contractions, and broken/spoken forms. ' +
+      'For Persian this means شکسته‌نویسی و لحن کاملاً خودمونی و کوچه‌بازاری تهرانی ' +
+      '(مثل: میخوام، نمیدونم، بریم تو کارش). Keep it natural, not vulgar.',
+  },
+  classy: {
+    fa: 'محاوره‌ای اما باکلاس و شیک',
+    guide:
+      'Conversational and friendly, but elegant, polished and classy. Spoken ' +
+      'register WITHOUT low slang. For Persian: محاوره‌ای و صمیمی ولی شیک و مؤدب، ' +
+      'شکسته‌نویسی نرم و باوقار، بدون الفاظ کوچه‌بازاری.',
+  },
+  formal: {
+    fa: 'رسمی و حقوقی',
+    guide:
+      'Strictly formal, written, legal/administrative register. No contractions, ' +
+      'no spoken forms. For Persian: کاملاً رسمی و مکتوب و حقوقی، بدون شکسته‌نویسی، ' +
+      'با ادبیات دقیق و رسمی.',
+  },
+};
+
+function buildSystemPrompt(source, target, toneKey) {
+  const tone = TONES[toneKey] || TONES.classy;
+  return `You are an expert subtitle translator. You translate from ${source} to ${target}.
+
+TONE / REGISTER (apply to the ${target} output):
+${tone.guide}
+
+HARD RULES:
+1. The translation must be fluent, natural and idiomatic in ${target} — never a literal word-for-word rendering. It should read as if originally written in ${target}.
+2. Proper nouns and brand/product/technology names that are in Latin/English letters must NOT be left in Latin letters inside the ${target} sentence (they break the flow). Instead, transliterate them phonetically into ${target} script and wrap them in quotation marks.
+   Examples (English -> Persian):
+     Claude Cowork  -> "کلاود کوورک"
+     N8N            -> "ان ایت ان"
+     Claude Code    -> "کلاود کد"
+   Apply the same idea for any target language: phonetic transliteration in quotes.
+3. Keep each segment's meaning; do not merge, split, drop, or reorder segments.
+4. Preserve the segment count exactly. Every input id must appear once in the output.
+5. Do NOT add explanations, notes, or extra text. Translate ONLY the content.
+6. Keep line breaks inside a segment roughly similar when it reads naturally, but prioritize fluency.
+
+OUTPUT FORMAT:
+Return ONLY a JSON array. Each element: {"id": <number>, "t": "<translated text>"}.
+No markdown, no code fences, no commentary — just the raw JSON array.`;
+}
+
+// Extract a JSON array from a model response, tolerating stray text/fences.
+function extractJsonArray(str) {
+  let s = str.trim();
+  const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) s = fence[1].trim();
+  const start = s.indexOf('[');
+  const end = s.lastIndexOf(']');
+  if (start === -1 || end === -1 || end < start) {
+    throw new Error('No JSON array found in model response');
+  }
+  return JSON.parse(s.slice(start, end + 1));
+}
+
+async function callClaude({ apiKey, model, system, userText }) {
+  const res = await fetch(API_URL, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 8000,
+      system,
+      messages: [{ role: 'user', content: userText }],
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Claude API ${res.status}: ${body.slice(0, 400)}`);
+  }
+  const data = await res.json();
+  const text = (data.content || [])
+    .filter((b) => b.type === 'text')
+    .map((b) => b.text)
+    .join('');
+  return text;
+}
+
+// Translate one batch of cues -> map of id -> translated text.
+async function translateBatch({ apiKey, model, system, batch }) {
+  const payload = batch.map((c) => ({ id: c.id, t: c.text }));
+  const userText =
+    'Translate the "t" field of each object below. Return the JSON array as instructed.\n\n' +
+    JSON.stringify(payload, null, 0);
+
+  const raw = await callClaude({ apiKey, model, system, userText });
+  const arr = extractJsonArray(raw);
+  const map = new Map();
+  for (const item of arr) {
+    if (item && typeof item.id !== 'undefined') {
+      map.set(Number(item.id), typeof item.t === 'string' ? item.t : '');
+    }
+  }
+  return map;
+}
+
+// Translate all cues in batches. `onProgress(done, total)` is called after each batch.
+// Returns a new array of cues with translated text (index/time untouched by caller).
+async function translateCues({
+  apiKey,
+  model = 'claude-sonnet-5',
+  source,
+  target,
+  tone,
+  cues,
+  batchSize = 20,
+  onProgress = () => {},
+}) {
+  const system = buildSystemPrompt(source, target, tone);
+
+  // Only translate cues that actually have text.
+  const translatable = cues
+    .map((c, i) => ({ i, text: c.text.trim() }))
+    .filter((c) => c.text.length > 0);
+
+  const total = translatable.length;
+  const results = new Map(); // cue index -> translated text
+  let done = 0;
+  let failedBatches = 0;
+  let batchNo = 0;
+
+  for (let start = 0; start < translatable.length; start += batchSize) {
+    batchNo++;
+    const slice = translatable.slice(start, start + batchSize);
+    const batch = slice.map((c) => ({ id: c.i, text: cues[c.i].text }));
+
+    let map = null;
+    let lastErr = null;
+    // Try once, retry once on failure.
+    for (let attempt = 0; attempt < 2 && map === null; attempt++) {
+      try {
+        map = await translateBatch({ apiKey, model, system, batch });
+      } catch (err) {
+        lastErr = err;
+        console.error(`[translate] batch ${batchNo} attempt ${attempt + 1} failed:`, err.message);
+      }
+    }
+
+    if (map === null) {
+      // The very first batch failing almost always means a config problem
+      // (bad key, no credit, wrong model). Surface the real error instead of
+      // silently returning the untranslated original and claiming success.
+      if (batchNo === 1) {
+        throw lastErr || new Error('Translation failed on the first batch');
+      }
+      failedBatches++;
+      map = new Map();
+    }
+
+    for (const c of slice) {
+      const translated = map.get(c.i);
+      results.set(c.i, typeof translated === 'string' && translated.length ? translated : cues[c.i].text);
+    }
+
+    done += slice.length;
+    onProgress(done, total);
+  }
+
+  if (failedBatches > 0) {
+    console.error(`[translate] ${failedBatches} batch(es) failed; those cues kept original text.`);
+  }
+
+  return cues.map((c, i) => ({
+    ...c,
+    text: results.has(i) ? results.get(i) : c.text,
+  }));
+}
+
+module.exports = { translateCues, TONES };

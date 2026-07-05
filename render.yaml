@@ -1,0 +1,22 @@
+# Render blueprint. Deploy at https://render.com -> New -> Blueprint (or Web Service).
+# Secret values (API key, access code) are set in the Render dashboard, NOT here.
+services:
+  - type: web
+    name: zirnevis
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      # Set this in the Render dashboard (Environment tab) — keep it secret.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      # Shared access code users must enter. Set it in the dashboard.
+      - key: ACCESS_CODE
+        sync: false
+      # Which model to use for translation (owner pays for this).
+      - key: TRANSLATE_MODEL
+        value: claude-sonnet-5
+      # Max subtitle cues per file (cost guard).
+      - key: MAX_CUES
+        value: "3000"

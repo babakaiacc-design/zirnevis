@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>زیرنویس — مترجم فایل SRT</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="hero">
+      <h1>زیرنویس</h1>
+      <p>فایل زیرنویس <span class="mono">SRT</span> خود را بارگذاری کنید، زبان و لحن را انتخاب کنید و ترجمه‌ای سلیس و گویا تحویل بگیرید.</p>
+    </header>
+
+    <main>
+      <!-- Step 1: file -->
+      <section class="card">
+        <h2><span class="step">۱</span> فایل زیرنویس</h2>
+        <label id="drop" class="dropzone" for="file">
+          <input type="file" id="file" accept=".srt,text/plain" hidden />
+          <div class="drop-inner">
+            <div class="drop-icon">⬆</div>
+            <div id="dropText">فایل <span class="mono">.srt</span> را اینجا رها کنید یا کلیک کنید</div>
+            <div id="fileMeta" class="file-meta"></div>
+          </div>
+        </label>
+      </section>
+
+      <!-- Step 2: languages -->
+      <section class="card">
+        <h2><span class="step">۲</span> زبان مبدأ و مقصد</h2>
+        <div class="grid-2">
+          <div class="field">
+            <label for="source">زبان مبدأ</label>
+            <input list="langs" id="source" placeholder="مثلاً English" value="English" />
+          </div>
+          <div class="field">
+            <label for="target">زبان مقصد</label>
+            <input list="langs" id="target" placeholder="مثلاً فارسی" value="فارسی" />
+          </div>
+        </div>
+        <datalist id="langs">
+          <option value="English"></option>
+          <option value="فارسی"></option>
+          <option value="العربية"></option>
+          <option value="Français"></option>
+          <option value="Deutsch"></option>
+          <option value="Español"></option>
+          <option value="Türkçe"></option>
+          <option value="Русский"></option>
+          <option value="中文"></option>
+        </datalist>
+      </section>
+
+      <!-- Step 3: tone -->
+      <section class="card">
+        <h2><span class="step">۳</span> لحن ترجمه</h2>
+        <div class="tones">
+          <label class="tone">
+            <input type="radio" name="tone" value="street" />
+            <div class="tone-body">
+              <strong>محاوره‌ای و کوچه‌بازاری</strong>
+              <span>خیلی خودمونی، شکسته و پر از اصطلاحات روزمره</span>
+            </div>
+          </label>
+          <label class="tone">
+            <input type="radio" name="tone" value="classy" checked />
+            <div class="tone-body">
+              <strong>محاوره‌ای، باکلاس و شیک</strong>
+              <span>صمیمی ولی مؤدب و باوقار، بدون الفاظ کوچه‌بازاری</span>
+            </div>
+          </label>
+          <label class="tone">
+            <input type="radio" name="tone" value="formal" />
+            <div class="tone-body">
+              <strong>رسمی و حقوقی</strong>
+              <span>کاملاً رسمی و مکتوب، بدون شکسته‌نویسی</span>
+            </div>
+          </label>
+        </div>
+      </section>
+
+      <!-- Step 4: access code -->
+      <section class="card">
+        <h2><span class="step">۴</span> کد دسترسی</h2>
+        <div class="field">
+          <label for="accessCode">کد دسترسی <span class="hint">(اگر برایتان کدی فرستاده شده اینجا وارد کنید)</span></label>
+          <input type="password" id="accessCode" placeholder="کد دسترسی" autocomplete="off" />
+        </div>
+      </section>
+
+      <div class="actions">
+        <button id="go" class="primary" disabled>ترجمه کن</button>
+        <span id="status" class="status"></span>
+      </div>
+
+      <div id="progressWrap" class="progress-wrap" hidden>
+        <div class="progress"><div id="bar" class="bar"></div></div>
+        <div id="progressText" class="progress-text"></div>
+      </div>
+
+      <!-- Result -->
+      <section id="resultCard" class="card" hidden>
+        <div class="result-head">
+          <h2>نتیجه ترجمه</h2>
+          <button id="download" class="primary small">دانلود فایل ترجمه‌شده</button>
+        </div>
+        <pre id="result" class="result" dir="auto"></pre>
+      </section>
+    </main>
+
+    <footer>ساخته‌شده با ❤ — ساختار فایل (شماره‌ها و تایم‌کدها) دست‌نخورده باقی می‌ماند.</footer>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
