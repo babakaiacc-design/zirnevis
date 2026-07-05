@@ -77,38 +77,112 @@ go.addEventListener('click', async () => {
   progressText.textContent = 'در حال آماده‌سازی...';
   setStatus('در حال ترجمه...', '');
 
-  try {
-    const res = await fetch('/api/translate', {
+  // Parse the SRT in the browser so we can drive many SHORT batch requests.
+  const cues = SRT.parseSrt(srtContent);
+  const translatable = cues
+    .map((c, i) => ({ i, text: c.text.trim() }))
+    .filter((c) => c.text.length > 0);
+
+  if (translatable.length === 0) {
+    setStatus('هیچ پاراگراف معتبری در فایل پیدا نشد', 'err');
+    progressWrap.hidden = true;
+    go.disabled = false;
+    return;
+  }
+
+  // Split into small batches; each is one short request.
+  const BATCH = 12;
+  const CONCURRENCY = 3;
+  const batches = [];
+  for (let s = 0; s < translatable.length; s += BATCH) {
+    batches.push(translatable.slice(s, s + BATCH));
+  }
+
+  const total = translatable.length;
+  let done = 0;
+  const results = new Map(); // cue index -> translated text
+  let firstError = null;
+
+  progressText.textContent = `شروع ترجمه ${total.toLocaleString('fa')} پاراگراف...`;
+
+  async function sendBatch(batch) {
+    const items = batch.map((c) => ({ id: c.i, text: cues[c.i].text }));
+    const res = await fetch('/api/translate-batch', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ srt: srtContent, source, target, tone, accessCode }),
+      body: JSON.stringify({ items, source, target, tone, accessCode }),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || `خطای سرور (${res.status})`);
+      const e = new Error(err.error || `خطای سرور (${res.status})`);
+      e.status = res.status;
+      throw e;
     }
+    const data = await res.json();
+    for (const it of data.items) results.set(Number(it.id), it.t);
+  }
 
-    // Parse the SSE stream manually.
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-
-      const chunks = buffer.split('\n\n');
-      buffer = chunks.pop();
-      for (const chunk of chunks) {
-        const evMatch = chunk.match(/^event: (.+)$/m);
-        const dataMatch = chunk.match(/^data: (.+)$/m);
-        if (!evMatch || !dataMatch) continue;
-        const event = evMatch[1].trim();
-        const data = JSON.parse(dataMatch[1]);
-        handleEvent(event, data);
+  async function processBatch(batch) {
+    // Two attempts per batch; a single dropped request won't kill the whole job.
+    let lastErr = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        await sendBatch(batch);
+        lastErr = null;
+        break;
+      } catch (err) {
+        lastErr = err;
+        // Don't retry on auth/config errors — they won't fix themselves.
+        if (err.status === 401 || err.status === 500) break;
+        await new Promise((r) => setTimeout(r, 800));
       }
     }
+    if (lastErr) {
+      if (!firstError) firstError = lastErr;
+      // Keep original text for this batch so the file stays complete.
+      for (const c of batch) if (!results.has(c.i)) results.set(c.i, cues[c.i].text);
+    }
+    done += batch.length;
+    const pct = Math.round((done / total) * 100);
+    bar.style.width = pct + '%';
+    progressText.textContent = `${done.toLocaleString('fa')} از ${total.toLocaleString('fa')} پاراگراف — ٪${pct.toLocaleString('fa')}`;
+  }
+
+  // Simple concurrency pool.
+  try {
+    let cursor = 0;
+    async function worker() {
+      while (cursor < batches.length) {
+        const my = batches[cursor++];
+        await processBatch(my);
+        // Stop early on a fatal auth/config error.
+        if (firstError && (firstError.status === 401 || firstError.status === 500)) return;
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, batches.length) }, worker));
+
+    // Fatal error (bad code / server not configured): surface it, no output.
+    if (firstError && (firstError.status === 401 || firstError.status === 500)) {
+      throw firstError;
+    }
+
+    const outCues = cues.map((c, i) => ({
+      ...c,
+      text: results.has(i) ? results.get(i) : c.text,
+    }));
+    translatedSrt = SRT.buildSrt(outCues);
+    resultEl.textContent = translatedSrt;
+    resultCard.hidden = false;
+    bar.style.width = '100%';
+
+    if (firstError) {
+      setStatus('ترجمه کامل شد، اما بخشی از پاراگراف‌ها ترجمه نشدند (متن اصلی حفظ شد)', 'err');
+      progressText.textContent = 'با چند خطای موقت به پایان رسید.';
+    } else {
+      setStatus('ترجمه کامل شد ✔', 'ok');
+      progressText.textContent = 'انجام شد.';
+    }
+    resultCard.scrollIntoView({ behavior: 'smooth' });
   } catch (err) {
     setStatus(err.message || 'خطا در ترجمه', 'err');
     progressWrap.hidden = true;
@@ -116,27 +190,6 @@ go.addEventListener('click', async () => {
     go.disabled = false;
   }
 });
-
-function handleEvent(event, data) {
-  if (event === 'start') {
-    progressText.textContent = `شروع ترجمه ${Number(data.total).toLocaleString('fa')} پاراگراف...`;
-  } else if (event === 'progress') {
-    const pct = Math.round((data.done / data.total) * 100);
-    bar.style.width = pct + '%';
-    progressText.textContent = `${data.done.toLocaleString('fa')} از ${data.total.toLocaleString('fa')} پاراگراف — ٪${pct.toLocaleString('fa')}`;
-  } else if (event === 'done') {
-    bar.style.width = '100%';
-    translatedSrt = data.srt;
-    resultEl.textContent = translatedSrt;
-    resultCard.hidden = false;
-    setStatus('ترجمه کامل شد ✔', 'ok');
-    progressText.textContent = 'انجام شد.';
-    resultCard.scrollIntoView({ behavior: 'smooth' });
-  } else if (event === 'error') {
-    setStatus(data.message || 'خطا در ترجمه', 'err');
-    progressWrap.hidden = true;
-  }
-}
 
 // ---- Download ----
 downloadBtn.addEventListener('click', () => {

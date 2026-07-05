@@ -112,6 +112,18 @@ async function translateBatch({ apiKey, model, system, batch }) {
   return map;
 }
 
+// Stateless single-batch translate for the client-driven (short-request) flow.
+// `items` is [{ id, text }]; returns [{ id, t }] in the same order. Throws on API error.
+async function translateItems({ apiKey, model = 'claude-sonnet-5', source, target, tone, items }) {
+  const system = buildSystemPrompt(source, target, tone);
+  const batch = items.map((it) => ({ id: it.id, text: it.text }));
+  const map = await translateBatch({ apiKey, model, system, batch });
+  return items.map((it) => {
+    const t = map.get(Number(it.id));
+    return { id: it.id, t: typeof t === 'string' && t.length ? t : it.text };
+  });
+}
+
 // Translate all cues in batches. `onProgress(done, total)` is called after each batch.
 // Returns a new array of cues with translated text (index/time untouched by caller).
 async function translateCues({
@@ -184,4 +196,4 @@ async function translateCues({
   }));
 }
 
-module.exports = { translateCues, TONES };
+module.exports = { translateCues, translateItems, TONES };

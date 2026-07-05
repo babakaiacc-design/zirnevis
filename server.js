@@ -5,7 +5,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { parseSrt, buildSrt } = require('./srt');
-const { translateCues } = require('./translate');
+const { translateCues, translateItems } = require('./translate');
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -137,7 +137,62 @@ async function handleTranslate(req, res) {
   }
 }
 
+// Short, stateless endpoint: translate one small batch and return plain JSON.
+// The browser drives the loop (parses/rebuilds the SRT itself), so no request
+// stays open long — this survives flaky networks/VPNs far better than SSE.
+async function handleTranslateBatch(req, res) {
+  const json = (status, obj) => {
+    res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify(obj));
+  };
+
+  let payload;
+  try {
+    payload = JSON.parse(await readBody(req));
+  } catch (e) {
+    return json(400, { error: 'Invalid JSON body' });
+  }
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const { items, source, target, tone, accessCode } = payload;
+
+  if (!apiKey) return json(500, { error: 'سرور پیکربندی نشده است (ANTHROPIC_API_KEY تنظیم نشده).' });
+
+  const requiredCode = process.env.ACCESS_CODE;
+  if (requiredCode && (accessCode || '').trim() !== requiredCode) {
+    return json(401, { error: 'کد دسترسی نادرست است.' });
+  }
+
+  if (!source || !target || !tone) return json(400, { error: 'Missing source/target/tone' });
+  if (!Array.isArray(items) || items.length === 0) return json(400, { error: 'No items to translate' });
+
+  const maxBatch = Number(process.env.MAX_BATCH || 40);
+  if (items.length > maxBatch) return json(400, { error: `Batch too large (max ${maxBatch})` });
+
+  try {
+    const translated = await translateItems({
+      apiKey,
+      model: process.env.TRANSLATE_MODEL || 'claude-sonnet-5',
+      source,
+      target,
+      tone,
+      items,
+    });
+    return json(200, { items: translated });
+  } catch (err) {
+    console.error('[translate-batch] failed:', err.message);
+    return json(502, { error: String(err && err.message ? err.message : err) });
+  }
+}
+
 const server = http.createServer((req, res) => {
+  if (req.method === 'POST' && req.url === '/api/translate-batch') {
+    handleTranslateBatch(req, res).catch((err) => {
+      if (!res.headersSent) res.writeHead(500, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: String(err.message || err) }));
+    });
+    return;
+  }
   if (req.method === 'POST' && req.url === '/api/translate') {
     handleTranslate(req, res).catch((err) => {
       if (!res.headersSent) {
